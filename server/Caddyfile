@@ -1,0 +1,13 @@
+# HTTPS automático (Let's Encrypt). O app precisa de wss://, e o Caddy cuida do certificado.
+#   https://DOMINIO/api/*  → serviço de tokens
+#   https://DOMINIO/*      → LiveKit (sinalização WebSocket)
+
+{$SPECTRA_DOMAIN} {
+	handle_path /api/* {
+		reverse_proxy 127.0.0.1:5080
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:7880
+	}
+}

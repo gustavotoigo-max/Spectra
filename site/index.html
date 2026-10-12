@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0A0B11" />
+    <meta name="description" content="Spectra: transmita sua tela para os amigos em alta qualidade. Cada um escolhe a qualidade que recebe." />
+    <title>Spectra — transmissão de tela para o seu grupo</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="./"><img src="favicon.svg" alt="" width="24" height="24" /><span>Spectra</span></a>
+      <nav class="topnav">
+        <a href="#como-funciona">Como funciona</a>
+        <a href="https://github.com/gustavotoigo-max/Spectra" target="_blank" rel="noopener">GitHub</a>
+      </nav>
+      <a class="btn btn-primary btn-top download-link" href="https://github.com/gustavotoigo-max/Spectra/releases/latest/download/Spectra.exe">Baixar</a>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="glow" aria-hidden="true"></div>
+        <span class="eyebrow"><span class="eq" aria-hidden="true"><i></i><i></i><i></i></span>Transmissão de tela para o seu grupo</span>
+        <h1>Sua tela,<br /><em>ao vivo para a galera.</em></h1>
+        <p class="lead">
+          Transmita jogos, filmes e o que mais quiser em até 1440p a 60 fps, com o áudio do computador. Você envia uma vez só, e
+          cada amigo escolhe a qualidade que recebe.
+        </p>
+
+        <a class="btn btn-primary btn-xl download-link" href="https://github.com/gustavotoigo-max/Spectra/releases/latest/download/Spectra.exe">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M3 5.5 10.5 4.4v7.1H3V5.5Zm0 13 7.5 1.1v-7.1H3v6ZM11.5 4.3 21 3v8.5h-9.5V4.3Zm0 15.4L21 21v-8.5h-9.5v7.2Z"/></svg>
+          <span>Baixar para Windows</span>
+        </a>
+        <p class="note"><span id="version">Windows 10 e 11</span> · grátis · sem instalação</p>
+
+        <div class="mock" aria-hidden="true">
+          <div class="mock-bar">
+            <span class="mock-brand"><img src="favicon.svg" alt="" width="16" height="16" />Spectra</span>
+            <span class="mock-room">Sala <b>K4TRH</b></span>
+            <span class="mock-status">Conectado</span>
+          </div>
+          <div class="mock-grid">
+            <div class="mock-left">
+              <small>Na sala — 4</small>
+              <div class="mock-p"><span style="background: #8b5cff">G</span><div><b>Gus</b><em>2 assistindo</em></div><i>AO VIVO</i></div>
+              <div class="mock-p"><span style="background: #4c8dff">J</span><div><b>João</b><em>assistindo Gus</em></div></div>
+              <div class="mock-p"><span style="background: #2fe0c4">A</span><div><b>Ana</b><em>assistindo Gus</em></div></div>
+              <div class="mock-p"><span style="background: #ff5c7a">P</span><div><b>Pedro</b><em>na sala</em></div></div>
+            </div>
+            <div class="mock-main">
+              <div class="mock-video">
+                <div class="mock-screen"><i></i><i></i><i></i></div>
+                <span class="mock-live">AO VIVO <b>Gus</b></span>
+                <span class="mock-q">Qualidade · 1080p60</span>
+              </div>
+              <div class="mock-dock">
+                <div><b>Assistindo Gus</b><em>1920×1080 · 60 fps · 7,4 Mbps</em></div>
+                <span class="mock-btn">Transmitir tela</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="como-funciona">
+        <span class="kicker">Como funciona</span>
+        <h2>Do download à transmissão em três passos.</h2>
+        <ol class="steps">
+          <li>
+            <b>01</b>
+            <strong>Baixe e abra</strong>
+            <span>Um único arquivo, sem instalar nada. Na primeira vez, coloque o servidor e a chave de acesso do grupo.</span>
+          </li>
+          <li>
+            <b>02</b>
+            <strong>Crie uma sala</strong>
+            <span>O Spectra gera um código. Mande para os amigos no Discord ou no WhatsApp.</span>
+          </li>
+          <li>
+            <b>03</b>
+            <strong>Transmita</strong>
+            <span>Escolha resolução e FPS, clique em “Transmitir tela”. Quem assiste ajusta a qualidade do lado de lá.</span>
+          </li>
+        </ol>
+        <p class="smartscreen">
+          O Windows pode mostrar “O Windows protegeu o computador” porque o app ainda não tem assinatura digital. Clique em
+          <b>Mais informações → Executar assim mesmo</b>.
+        </p>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span class="brand"><img src="favicon.svg" alt="" width="20" height="20" /><span>Spectra</span></span>
+      <span>Código aberto · servidor próprio com LiveKit</span>
+    </footer>
+
+    <script>
+      // Mostra a versão mais recente ao lado do botão (se a API do GitHub responder).
+      fetch('https://api.github.com/repos/gustavotoigo-max/Spectra/releases/latest')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((rel) => {
+          if (!rel) return
+          const exe = (rel.assets || []).find((a) => a.name === 'Spectra.exe')
+          const size = exe ? ` · ${Math.round(exe.size / 1e6)} MB` : ''
+          document.getElementById('version').textContent = `Versão ${String(rel.tag_name).replace(/^v/, '')}${size} · Windows 10 e 11`
+        })
+        .catch(() => {})
+    </script>
+  </body>
+</html>

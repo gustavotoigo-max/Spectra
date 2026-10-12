@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Spectra</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="stylesheet" href="fonts/fonts.css" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <!-- ===== Configuração do servidor ===== -->
+    <section class="view view-setup" id="view-setup" hidden>
+      <div class="setup-glow" aria-hidden="true"></div>
+      <form class="card setup-card" id="setup-form" autocomplete="off">
+        <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Spectra</span></div>
+        <h1>Conectar ao servidor</h1>
+        <p class="hint">Peça o endereço e a chave de acesso para quem montou o servidor do grupo.</p>
+
+        <label class="field">
+          <span>Seu nome</span>
+          <input id="setup-name" maxlength="32" placeholder="Como os amigos vão te ver" required />
+        </label>
+        <label class="field">
+          <span>Servidor</span>
+          <input id="setup-server" placeholder="https://129-146-10-20.sslip.io" required spellcheck="false" />
+        </label>
+        <label class="field">
+          <span>Chave de acesso</span>
+          <input id="setup-key" type="password" placeholder="••••••••••" required spellcheck="false" />
+        </label>
+
+        <p class="form-error" id="setup-error" hidden></p>
+        <div class="row setup-actions">
+          <button type="button" class="btn btn-secondary" id="setup-cancel" hidden>Cancelar</button>
+          <button type="submit" class="btn btn-primary grow" id="setup-submit">Testar e salvar</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- ===== Início ===== -->
+    <section class="view view-home" id="view-home" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Spectra</span></div>
+        <div class="topbar-right">
+          <span class="me-chip" id="home-me"></span>
+          <button class="icon-btn" id="home-settings" title="Servidor e nome" aria-label="Configurações">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1l-.4-2.6h-4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L4.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5L19.4 13ZM12 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="home-body">
+        <div class="home-glow" aria-hidden="true"></div>
+        <div class="update-banner" id="update-banner" hidden></div>
+        <span class="eyebrow"><span class="eq is-on" aria-hidden="true"><i></i><i></i><i></i></span>Transmissão de tela para o seu grupo</span>
+        <h1>Sua tela,<br /><em>ao vivo para a galera.</em></h1>
+        <p class="home-lead">Crie uma sala, mande o código e transmita em alta qualidade. Cada um escolhe a qualidade que recebe.</p>
+
+        <div class="home-actions">
+          <div class="card home-card">
+            <strong>Nova sala</strong>
+            <span class="hint">Gera um código para os amigos entrarem.</span>
+            <button class="btn btn-primary btn-lg" id="home-create">Criar uma sala</button>
+          </div>
+          <form class="card home-card" id="home-join-form">
+            <strong>Tenho um código</strong>
+            <span class="hint">Entre na sala de alguém.</span>
+            <div class="row">
+              <input id="home-code" class="code-input" maxlength="12" placeholder="K4TRH" spellcheck="false" autocomplete="off" />
+              <button class="btn btn-secondary btn-lg" type="submit">Entrar</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="recent" id="home-recent" hidden>
+          <small>Salas recentes</small>
+          <div class="recent-list" id="home-recent-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== Sala ===== -->
+    <section class="view view-room" id="view-room" hidden>
+      <header class="topbar room-topbar">
+        <div class="topbar-brand">
+          <div class="brand"><span class="brand-mark" aria-hidden="true"></span><span>Spectra</span></div>
+        </div>
+        <div class="channel">
+          <span class="channel-name">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 5h18v11H3V5Zm2 2v7h14V7H5Zm3 11h8v2H8v-2Z"/></svg>
+            Sala <b id="room-code">—</b>
+          </span>
+          <button class="btn btn-ghost btn-sm" id="room-copy" title="Copiar o código da sala">Copiar código</button>
+          <span class="status-pill" id="room-status">Conectando…</span>
+          <button class="btn btn-secondary btn-sm room-leave" id="room-leave">Sair</button>
+        </div>
+      </header>
+
+      <div class="room-grid">
+        <aside class="room-left">
+          <small class="col-title">Na sala — <span id="people-count">0</span></small>
+          <ul class="people" id="people"></ul>
+          <div class="left-foot">
+            <span class="me-chip" id="room-me"></span>
+          </div>
+        </aside>
+
+        <main class="room-main">
+          <div class="stage" id="stage">
+            <video id="stage-video" playsinline autoplay muted></video>
+            <audio id="stage-audio" autoplay></audio>
+
+            <div class="stage-empty" id="stage-empty">
+              <div class="stage-art" aria-hidden="true"></div>
+              <strong id="stage-empty-title">Ninguém está transmitindo</strong>
+              <span class="hint" id="stage-empty-hint">Clique em “Transmitir tela” para começar, ou espere alguém compartilhar.</span>
+            </div>
+
+            <div class="stage-top" id="stage-top" hidden>
+              <span class="live-tag">AO VIVO</span>
+              <span class="stage-who" id="stage-who"></span>
+              <span class="stage-stats" id="stage-stats"></span>
+            </div>
+
+            <div class="stage-controls" id="stage-controls" hidden>
+              <label class="ctl" id="ctl-quality-wrap">
+                <span>Qualidade</span>
+                <select id="ctl-quality"></select>
+              </label>
+              <label class="ctl ctl-volume" id="ctl-volume-wrap">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4ZM14 3.2v2.1a7 7 0 0 1 0 13.4v2.1a9 9 0 0 0 0-17.6Z"/></svg>
+                <input type="range" id="ctl-volume" min="0" max="1" step="0.01" aria-label="Volume" />
+              </label>
+              <button class="icon-btn" id="ctl-fullscreen" title="Tela cheia (duplo clique)" aria-label="Tela cheia">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 4h6v2H6v4H4V4Zm10 0h6v6h-2V6h-4V4ZM4 14h2v4h4v2H4v-6Zm14 0h2v6h-6v-2h4v-4Z"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="dock">
+            <div class="dock-info" id="dock-info">
+              <strong id="dock-title">Pronto para transmitir</strong>
+              <span class="hint" id="dock-sub"></span>
+            </div>
+            <button class="btn btn-secondary" id="share-settings-btn">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 17v2h6v-2H3ZM3 5v2h10V5H3Zm10 16v-2h8v-2h-8v-2h-2v6h2ZM7 9v2H3v2h4v2h2V9H7Zm14 4v-2H11v2h10Zm-6-4h2V7h4V5h-4V3h-2v6Z"/></svg>
+              <span id="share-summary">1080p · 60 fps</span>
+            </button>
+            <button class="btn btn-primary btn-share" id="share-btn">
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M3 4h18v12H3V4Zm2 2v8h14V6H5Zm7 1.5 4 3.5h-3v3h-2v-3H8l4-3.5ZM7 18h10v2H7v-2Z"/></svg>
+              <span id="share-btn-label">Transmitir tela</span>
+            </button>
+          </div>
+        </main>
+      </div>
+
+      <!-- Painel de configurações da transmissão -->
+      <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+      <aside class="drawer" id="share-drawer" hidden aria-label="Configurações da transmissão">
+        <header class="drawer-head">
+          <strong>Configurações da transmissão</strong>
+          <button class="icon-btn" id="drawer-close" aria-label="Fechar">✕</button>
+        </header>
+        <div class="drawer-body">
+          <p class="drawer-lock" id="drawer-lock" hidden>Pare a transmissão para mudar estas opções.</p>
+
+          <fieldset class="seg" data-key="res">
+            <legend>Resolução</legend>
+            <button type="button" data-val="720">720p</button>
+            <button type="button" data-val="1080">1080p</button>
+            <button type="button" data-val="1440">1440p</button>
+          </fieldset>
+
+          <fieldset class="seg" data-key="fps">
+            <legend>Quadros por segundo</legend>
+            <button type="button" data-val="30">30 fps</button>
+            <button type="button" data-val="60">60 fps</button>
+          </fieldset>
+
+          <fieldset class="seg" data-key="quality">
+            <legend>Qualidade da imagem</legend>
+            <button type="button" data-val="eco">Econômica</button>
+            <button type="button" data-val="balanced">Equilibrada</button>
+            <button type="button" data-val="high">Alta</button>
+          </fieldset>
+
+          <fieldset class="seg" data-key="content">
+            <legend>O que você vai mostrar</legend>
+            <button type="button" data-val="motion">Jogo ou vídeo</button>
+            <button type="button" data-val="detail">Texto ou código</button>
+          </fieldset>
+
+          <fieldset class="seg" data-key="codec">
+            <legend>Codec</legend>
+            <button type="button" data-val="h264">H.264</button>
+            <button type="button" data-val="vp9">VP9</button>
+            <button type="button" data-val="av1">AV1</button>
+          </fieldset>
+
+          <label class="switch">
+            <input type="checkbox" id="opt-audio" />
+            <span class="switch-ui" aria-hidden="true"></span>
+            <span>
+              <b>Transmitir o áudio do computador</b>
+              <em>Marque “Compartilhar áudio do sistema” no seletor de tela.</em>
+            </span>
+          </label>
+
+          <div class="drawer-summary" id="drawer-summary"></div>
+        </div>
+      </aside>
+    </section>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+
+    <script src="vendor/livekit-client.umd.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
