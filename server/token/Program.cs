@@ -16,6 +16,11 @@ var builder = WebApplication.CreateSlimBuilder(args);
 var config = TokenConfig.FromEnvironment();
 
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, ApiJson.Default));
+builder.Services.AddSingleton(config);
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<LiveKitAdmin>();
+builder.Services.AddSingleton<UsageMeter>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<UsageMeter>());
 builder.Services.AddCors(o => o.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyHeader().WithMethods("GET", "POST")));
 builder.Services.AddRateLimiter(o =>
 {
@@ -33,9 +38,18 @@ app.UseRateLimiter();
 
 app.MapGet("/health", () => Results.Ok(new HealthResponse("ok", config.PublicUrl)));
 
-app.MapPost("/token", (TokenRequest? req) =>
+// Uso do tráfego mensal: público, para o app e a página de download mostrarem o aviso.
+app.MapGet("/usage", (UsageMeter meter) => Results.Ok(meter.Snapshot()));
+
+app.MapPost("/token", (TokenRequest? req, UsageMeter meter) =>
 {
     if (req is null) return Results.BadRequest(new ErrorResponse("Pedido inválido."));
+
+    var usage = meter.Snapshot();
+    if (usage.Status == "blocked")
+        return Results.Json(
+            new ErrorResponse($"O servidor atingiu o limite de tráfego do mês ({usage.LimitBytes / 1_000_000_000_000.0:0.#} TB). O Spectra volta a funcionar em {Validation.DateBr(usage.ResetsOn)}."),
+            ApiJson.Default.ErrorResponse, statusCode: 403);
 
     if (!config.CheckAccessKey(req.AccessKey))
         return Results.Json(new ErrorResponse("Chave de acesso incorreta."), ApiJson.Default.ErrorResponse, statusCode: 401);
@@ -101,6 +115,9 @@ static partial class Validation
         return name.Length is >= 1 and <= 32 ? name : null;
     }
 
+    public static string DateBr(string isoDate) =>
+        DateOnly.TryParseExact(isoDate, "yyyy-MM-dd", out var d) ? d.ToString("dd/MM/yyyy", System.Globalization.CultureInfo.InvariantCulture) : isoDate;
+
     public static string Slug(string name)
     {
         var plain = new string(name.Normalize(NormalizationForm.FormD)
@@ -133,9 +150,21 @@ static class LiveKitToken
                 CanUpdateOwnMetadata: true // o transmissor anuncia as camadas de qualidade
             ));
 
+        return Sign(apiSecret, JsonSerializer.SerializeToUtf8Bytes(claims, ApiJson.Default.LiveKitClaims));
+    }
+
+    /// <summary>Token só para o próprio servidor: listar e encerrar salas.</summary>
+    public static string CreateAdmin(string apiKey, string apiSecret, TimeSpan ttl)
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var claims = new AdminClaims(apiKey, now - 10, now + (long)ttl.TotalSeconds, new AdminGrant(RoomList: true, RoomCreate: true));
+        return Sign(apiSecret, JsonSerializer.SerializeToUtf8Bytes(claims, ApiJson.Default.AdminClaims));
+    }
+
+    private static string Sign(string apiSecret, byte[] claimsJson)
+    {
         var header = B64(JsonSerializer.SerializeToUtf8Bytes(new JwtHeader("HS256", "JWT"), ApiJson.Default.JwtHeader));
-        var payload = B64(JsonSerializer.SerializeToUtf8Bytes(claims, ApiJson.Default.LiveKitClaims));
-        var signingInput = $"{header}.{payload}";
+        var signingInput = $"{header}.{B64(claimsJson)}";
         var signature = HMACSHA256.HashData(Encoding.UTF8.GetBytes(apiSecret), Encoding.UTF8.GetBytes(signingInput));
         return $"{signingInput}.{B64(signature)}";
     }
@@ -151,6 +180,8 @@ record HealthResponse(string Status, string Url);
 record JwtHeader(string Alg, string Typ);
 record VideoGrant(string Room, bool RoomJoin, bool CanPublish, bool CanSubscribe, bool CanPublishData, bool CanUpdateOwnMetadata);
 record LiveKitClaims(string Iss, string Sub, string Name, long Nbf, long Exp, VideoGrant Video);
+record AdminGrant(bool RoomList, bool RoomCreate);
+record AdminClaims(string Iss, long Nbf, long Exp, AdminGrant Video);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(TokenRequest))]
@@ -159,4 +190,8 @@ record LiveKitClaims(string Iss, string Sub, string Name, long Nbf, long Exp, Vi
 [JsonSerializable(typeof(HealthResponse))]
 [JsonSerializable(typeof(JwtHeader))]
 [JsonSerializable(typeof(LiveKitClaims))]
+[JsonSerializable(typeof(AdminClaims))]
+[JsonSerializable(typeof(UsageState))]
+[JsonSerializable(typeof(UsageResponse))]
+[JsonSerializable(typeof(DeleteRoomRequest))]
 partial class ApiJson : JsonSerializerContext;

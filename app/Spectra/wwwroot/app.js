@@ -157,6 +157,53 @@ async function requestToken(room) {
 }
 
 // ---------------------------------------------------------------------------
+// Limite de tráfego do servidor (Oracle Always Free)
+//
+// O servidor mede o tráfego de saída do mês e bloqueia o uso ao atingir o limite
+// (5 TB por padrão). Aqui só mostramos o aviso e travamos os botões.
+
+/** @type {{status: 'ok'|'warning'|'blocked', usedBytes: number, limitBytes: number, percent: number, resetsOn: string} | null} */
+let usage = null
+
+const tb = (bytes) => `${(bytes / 1e12).toFixed(2).replace('.', ',')} TB`
+const dateBr = (iso) => (/^\d{4}-\d{2}-\d{2}$/.test(iso || '') ? iso.split('-').reverse().join('/') : iso)
+
+function usageMessage(u) {
+  if (u.status === 'blocked') {
+    return `O servidor atingiu o limite de tráfego do mês (${tb(u.limitBytes)}). O Spectra fica bloqueado até ${dateBr(u.resetsOn)}.`
+  }
+  return `Atenção: o servidor já usou ${String(u.percent).replace('.', ',')}% do tráfego do mês (${tb(u.usedBytes)} de ${tb(u.limitBytes)}). Ao chegar no limite, o Spectra fica bloqueado até ${dateBr(u.resetsOn)}.`
+}
+
+async function checkUsage() {
+  if (!settings.server) return null
+  try {
+    const res = await fetch(`${settings.server}/api/usage`, { cache: 'no-store' })
+    if (res.ok) usage = await res.json()
+  } catch {
+    /* sem conexão: mantém o último estado */
+  }
+  renderUsage()
+  return usage
+}
+
+function renderUsage() {
+  const el = $('usage-banner')
+  const blocked = usage?.status === 'blocked'
+  $('home-create').disabled = blocked
+  $('home-join').disabled = blocked
+  if (!usage || usage.status === 'ok') {
+    el.hidden = true
+    return
+  }
+  el.className = `usage-banner${blocked ? ' blocked' : ''}`
+  el.textContent = usageMessage(usage)
+  el.hidden = false
+}
+
+setInterval(checkUsage, 5 * 60 * 1000)
+
+// ---------------------------------------------------------------------------
 // Tela de configuração
 
 function openSetup(firstRun) {
@@ -211,6 +258,7 @@ function newCode() {
 }
 
 function openHome() {
+  checkUsage()
   meChip($('home-me'))
   renderRecent()
   showView('home')
@@ -232,6 +280,7 @@ $('home-settings').addEventListener('click', () => openSetup(false))
 $('home-create').addEventListener('click', () => joinRoom(newCode()))
 $('home-join-form').addEventListener('submit', (e) => {
   e.preventDefault()
+  if (usage?.status === 'blocked') return toast(usageMessage(usage), 'error')
   const code = $('home-code').value.trim().toUpperCase()
   if (!/^[A-Z0-9]{4,12}$/.test(code)) {
     toast('O código tem de 4 a 12 letras ou números.', 'error')
@@ -287,6 +336,7 @@ let attached = { video: null, audio: null }
 async function joinRoom(code) {
   if (room) return
   if (!settings.server || !settings.accessKey || !settings.name) return openSetup(true)
+  if (usage?.status === 'blocked') return toast(usageMessage(usage), 'error')
 
   roomCode = code
   leaving = false
@@ -329,6 +379,12 @@ function wireRoom(r) {
   })
   r.on(RoomEvent.Disconnected, async (reason) => {
     if (leaving) return
+    if (reason === DisconnectReason.ROOM_DELETED && (await checkUsage())?.status === 'blocked') {
+      toast(usageMessage(usage), 'error')
+      await cleanupRoom()
+      openHome()
+      return
+    }
     const msg =
       reason === DisconnectReason.DUPLICATE_IDENTITY
         ? 'Você entrou nesta sala em outra janela.'

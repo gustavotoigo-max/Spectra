@@ -597,3 +597,21 @@ a {
     transition: none !important;
   }
 }
+
+/* aviso do limite de tráfego do servidor */
+.usage-notice {
+  position: relative;
+  z-index: 5;
+  padding: 12px 24px;
+  text-align: center;
+  font-weight: 600;
+  font-size: 15px;
+  color: #f0b54a;
+  background: rgba(240, 181, 74, 0.12);
+  border-bottom: 1px solid #f0b54a;
+}
+.usage-notice.blocked {
+  color: #ff5c7a;
+  background: rgba(255, 92, 122, 0.14);
+  border-bottom-color: #ff5c7a;
+}

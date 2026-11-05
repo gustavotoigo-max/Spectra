@@ -13,6 +13,9 @@
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sora:wght@600;700;800&display=swap"
       rel="stylesheet"
     />
+    <!-- Servidor do grupo, para o aviso de limite de tráfego. Preenchido na publicação
+         a partir da variável SPECTRA_SERVER do repositório (veja o README). -->
+    <meta name="spectra-server" content="__SPECTRA_SERVER__" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -24,6 +27,8 @@
       </nav>
       <a class="btn btn-primary btn-top download-link" href="https://github.com/gustavotoigo-max/Spectra/releases/latest/download/Spectra.exe">Baixar</a>
     </header>
+
+    <div class="usage-notice" id="usage-notice" role="status" hidden></div>
 
     <main>
       <section class="hero">
@@ -113,6 +118,27 @@
           document.getElementById('version').textContent = `Versão ${String(rel.tag_name).replace(/^v/, '')}${size} · Windows 10 e 11`
         })
         .catch(() => {})
+
+      // Aviso de limite de tráfego do servidor (perto do limite ou bloqueado).
+      ;(() => {
+        const server = document.querySelector('meta[name="spectra-server"]')?.content || ''
+        if (!/^https:\/\//.test(server)) return
+        const tb = (b) => `${(b / 1e12).toFixed(2).replace('.', ',')} TB`
+        const date = (iso) => String(iso).split('-').reverse().join('/')
+        fetch(`${server.replace(/\/+$/, '')}/api/usage`, { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((u) => {
+            if (!u || (u.status !== 'warning' && u.status !== 'blocked')) return
+            const el = document.getElementById('usage-notice')
+            el.textContent =
+              u.status === 'blocked'
+                ? `O servidor do Spectra atingiu o limite de tráfego do mês (${tb(u.limitBytes)}). As transmissões voltam em ${date(u.resetsOn)}.`
+                : `O servidor do Spectra já usou ${String(u.percent).replace('.', ',')}% do tráfego do mês. Ao chegar em ${tb(u.limitBytes)}, as transmissões param até ${date(u.resetsOn)}.`
+            el.classList.toggle('blocked', u.status === 'blocked')
+            el.hidden = false
+          })
+          .catch(() => {})
+      })()
     </script>
   </body>
 </html>

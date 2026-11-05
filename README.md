@@ -55,6 +55,20 @@ O nível *Always Free* da Oracle tem VMs ARM com folga de CPU e uma cota de trá
 
 Para atualizar depois: `git pull && sudo ./install.sh` (as chaves são mantidas).
 
+### Limite de tráfego (5 TB por mês)
+
+A Oracle Always Free inclui 10 TB de tráfego de saída por mês. Para nunca passar disso, o serviço de tokens mede o que sai da VM a cada minuto e, ao chegar em **5 TB** no mês:
+
+- o app mostra o aviso e não deixa criar nem entrar em salas;
+- as salas abertas são encerradas, com o aviso para quem estava nelas;
+- a página de download mostra o aviso no topo.
+
+A partir de 80% do limite, o app e a página já mostram um aviso amarelo. O contador zera no dia 1º de cada mês (UTC) e fica salvo no volume `spectra_data`. O uso atual aparece em `https://SEU-SERVIDOR/api/usage`.
+
+- Para mudar o limite, edite `SPECTRA_MONTHLY_LIMIT_GB` no `server/.env` e rode `sudo ./install.sh` de novo.
+- A medição conta todo o tráfego de saída da VM, então fica um pouco acima do que a Oracle cobra. A contagem começa quando o servidor é instalado: confira também o uso no painel da Oracle (*Billing → Cost Analysis*).
+- Para o aviso na página de download, crie no GitHub a variável `SPECTRA_SERVER` (*Settings → Secrets and variables → Actions → Variables*) com o endereço do servidor, por exemplo `https://129-146-10-20.sslip.io`, e rode o workflow *Página de download* de novo.
+
 ## 2. Usar o app
 
 1. Baixe o `Spectra.exe` pela página ou pela aba *Releases*. Não precisa instalar.
