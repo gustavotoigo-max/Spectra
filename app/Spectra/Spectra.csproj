@@ -13,7 +13,7 @@
     <ApplicationIcon>app.ico</ApplicationIcon>
     <Product>Spectra</Product>
     <Description>Transmissão de tela para o seu grupo</Description>
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.2.0</VersionPrefix>
 
     <!-- Publicação: um único Spectra.exe, sem precisar instalar o .NET. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

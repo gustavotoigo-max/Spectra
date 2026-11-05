@@ -1,14 +1,19 @@
-# Compila o Spectra.exe no Windows a cada push.
-# Ao criar uma tag v*, publica o .exe numa Release do GitHub
-# (é dela que o botão "Baixar" da página puxa o arquivo).
+# Compila o Spectra.exe no Windows.
 #
-#   git tag v0.1.0 && git push origin v0.1.0
+# Lançamento automático: cada push no main que muda o app publica uma Release
+# nova no GitHub. O botão "Baixar" da página sempre puxa a Release mais recente,
+# e o app avisa os amigos que há versão nova.
+#
+# Número da versão: sobe o último número da Release anterior (0.2.0 → 0.2.1).
+# Para pular para 0.3.0 ou 1.0.0, mude <VersionPrefix> no Spectra.csproj.
+# Uma tag v* criada à mão também publica aquela versão.
 name: App
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+    paths: ['app/**', 'server/token/**', '.github/workflows/app.yml']
   pull_request:
   workflow_dispatch:
 
@@ -28,12 +33,27 @@ jobs:
 
       - name: Definir versão
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            "VERSION_ARGS=-p:VersionPrefix=$($env:GITHUB_REF_NAME.Substring(1))" >> $env:GITHUB_ENV
+            $ver = $env:GITHUB_REF_NAME.Substring(1)
+          } elseif ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF -eq 'refs/heads/main') {
+            # próxima versão: a do csproj, ou a última Release + 1 se o csproj não for maior
+            $base = [version](([xml](Get-Content app/Spectra/Spectra.csproj)).Project.PropertyGroup.VersionPrefix | Where-Object { $_ } | Select-Object -First 1)
+            $tag = gh release view --repo $env:GITHUB_REPOSITORY --json tagName -q .tagName 2>$null
+            if ($LASTEXITCODE -ne 0 -or -not $tag) { $ver = "$base" }
+            else {
+              $last = [version]($tag -replace '^v', '')
+              $ver = if ($base -gt $last) { "$base" } else { "$($last.Major).$($last.Minor).$($last.Build + 1)" }
+            }
           } else {
             "VERSION_ARGS=-p:VersionSuffix=dev.$($env:GITHUB_RUN_NUMBER)" >> $env:GITHUB_ENV
+            exit 0
           }
+          Write-Host "Versão: $ver"
+          "RELEASE_VERSION=$ver" >> $env:GITHUB_ENV
+          "VERSION_ARGS=-p:VersionPrefix=$ver" >> $env:GITHUB_ENV
 
       - name: Publicar (arquivo único, self-contained)
         shell: pwsh
@@ -52,11 +72,11 @@ jobs:
           if-no-files-found: error
 
       - name: Criar release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_VERSION != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create $env:GITHUB_REF_NAME out/Spectra.exe --title "Spectra $($env:GITHUB_REF_NAME.Substring(1))" --generate-notes
+        run: gh release create "v$env:RELEASE_VERSION" out/Spectra.exe --target $env:GITHUB_SHA --title "Spectra $env:RELEASE_VERSION" --generate-notes
 
   token-server:
     name: Serviço de tokens
