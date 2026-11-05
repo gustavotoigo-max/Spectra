@@ -107,12 +107,9 @@ LIVEKIT_PUBLIC_URL=ws://localhost:7880 dotnet run
 
 ### Publicar uma versão
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
+É automático: cada push no `main` que muda o app (ou o serviço de tokens) compila o `Spectra.exe` e publica uma Release nova, subindo o último número da versão (0.2.0 → 0.2.1). O botão da página baixa sempre a Release mais recente, e o app avisa quando há versão nova.
 
-O workflow **App** compila o `Spectra.exe` no Windows e cria a release. O botão da página baixa sempre a release mais recente, e o app avisa quando há versão nova.
+Para pular para 0.3.0 ou 1.0.0, mude `<VersionPrefix>` no `app/Spectra/Spectra.csproj`. Uma tag `v*` criada à mão também publica aquela versão.
 
 Para a página: em *Settings → Pages*, escolha **Source = GitHub Actions** uma vez.
 
