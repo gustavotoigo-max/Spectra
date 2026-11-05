@@ -58,12 +58,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create $env:GITHUB_REF_NAME out/Spectra.exe --title "Spectra $($env:GITHUB_REF_NAME.Substring(1))" --generate-notes
 
-  token-server:
-    name: Serviço de tokens
+  worker:
+    name: Servidor (Cloudflare Worker)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/worker
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-node@v4
         with:
-          dotnet-version: 8.0.x
-      - run: dotnet build server/token/Spectra.Token.csproj -c Release
+          node-version: 22
+      - run: npm ci
+      - run: npm run check

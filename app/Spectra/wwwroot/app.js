@@ -1,15 +1,18 @@
 // Spectra — interface do app (roda dentro do WebView2).
 //
-// Arquitetura: o transmissor captura a tela e envia UM fluxo (com camadas de
-// simulcast) para o servidor LiveKit (SFU). O servidor replica para cada
-// espectador a camada que ele escolheu. Ninguém recebe vídeo de quem não está
-// assistindo: a inscrição é manual (autoSubscribe: false), como no Discord.
-
-const L = window.LivekitClient
-const { Room, RoomEvent, Track, VideoPreset, VideoQuality, AudioPresets, ConnectionState, DisconnectReason } = L
+// Arquitetura: o transmissor captura a tela e envia UM fluxo (com 3 camadas de
+// simulcast) para o Cloudflare Realtime SFU. O SFU replica para cada espectador
+// a camada que ele escolheu. Ninguém recebe vídeo de quem não está assistindo:
+// o espectador só "puxa" a transmissão de quem escolheu, como no Discord.
+//
+// O servidor do grupo é um Worker da Cloudflare (pasta server/worker):
+//   /api/rooms/CODIGO/ws  WebSocket da sala: quem está, quem transmite, quem assiste quem
+//   /api/sfu/...          proxy para a API do SFU (o token secreto fica no Worker)
+//   /api/ice              servidores STUN/TURN
 
 const APP_VERSION = window.spectraHost?.version ?? 'dev'
 const REPO = 'gustavotoigo-max/Spectra'
+
 
 // ---------------------------------------------------------------------------
 // Armazenamento local (fica no perfil do WebView2, em %LOCALAPPDATA%\Spectra)
@@ -87,6 +90,14 @@ function meChip(el) {
 
 const mbps = (bps) => `${(bps / 1e6).toFixed(1).replace('.', ',')} Mbps`
 
+
+// Identificador fixo desta instalação: permite reconectar sem "sumir" da sala.
+let identity = store.get('identity', { id: '' })
+if (!/^[a-z0-9]{8,32}$/.test(identity.id)) {
+  identity = { id: Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('') }
+  store.set('identity', identity)
+}
+
 // ---------------------------------------------------------------------------
 // Plano de transmissão: resolução, bitrate e camadas de simulcast
 
@@ -95,35 +106,30 @@ const BASE_KBPS = { 720: 2500, 1080: 4500, 1440: 8000 } // a 30 fps, qualidade "
 const QUALITY_MULT = { eco: 0.6, balanced: 1, high: 1.6 }
 const QUALITY_NAME = { eco: 'Econômica', balanced: 'Equilibrada', high: 'Alta' }
 const CODEC_NAME = { h264: 'H.264', vp9: 'VP9', av1: 'AV1' }
+const CODEC_MIME = { h264: 'video/H264', vp9: 'video/VP9', av1: 'video/AV1' }
+// Nomes das camadas (RIDs). O SFU ordena "alfabeticamente": a = melhor.
+const RIDS = ['a', 'b', 'c']
+const QUALITY_RID = { high: 'a', medium: 'b', low: 'c' }
 
 /** Calcula o que vai ser enviado a partir das opções do transmissor. */
 function sharePlan(s) {
   const [w, h] = RES[s.res]
   const fps = Number(s.fps)
-  const svc = s.codec === 'vp9' || s.codec === 'av1'
+  const efficient = s.codec === 'vp9' || s.codec === 'av1'
   const fpsMult = fps >= 60 ? 1.5 : 1
-  const codecMult = svc ? 0.7 : 1 // VP9/AV1 entregam a mesma imagem com menos bits
+  const codecMult = efficient ? 0.7 : 1 // VP9/AV1 entregam a mesma imagem com menos bits
   const maxBitrate = Math.round(BASE_KBPS[s.res] * fpsMult * QUALITY_MULT[s.quality] * codecMult) * 1000
 
-  let layers // da maior para a menor (é a ordem que o espectador vê)
-  if (svc) {
-    // SVC: uma única transmissão com camadas espaciais 1/1, 1/2 e 1/4.
-    layers = [
-      { h, fps, bitrate: maxBitrate },
-      { h: h / 2, fps, bitrate: 0 },
-      { h: h / 4, fps, bitrate: 0 },
-    ]
-  } else {
-    const midH = h >= 1080 ? 720 : 360
-    const lowH = h >= 1080 ? 360 : 180
-    layers = [
-      { h, fps, bitrate: maxBitrate },
-      { h: midH, fps: Math.min(fps, 30), bitrate: midH === 720 ? 1_500_000 : 600_000 },
-      { h: lowH, fps: 15, bitrate: lowH === 360 ? 400_000 : 150_000 },
-    ]
-  }
-  const upload = (svc ? maxBitrate : layers.reduce((sum, l) => sum + l.bitrate, 0)) + (s.audio ? 128_000 : 0)
-  return { w, h, fps, svc, maxBitrate, layers, upload }
+  // da maior para a menor (é a ordem que o espectador vê)
+  const midH = h >= 1080 ? 720 : 360
+  const lowH = h >= 1080 ? 360 : 180
+  const layers = [
+    { rid: 'a', h, fps, bitrate: maxBitrate },
+    { rid: 'b', h: midH, fps: Math.min(fps, 30), bitrate: Math.round((midH === 720 ? 1_500_000 : 600_000) * codecMult) },
+    { rid: 'c', h: lowH, fps: 15, bitrate: Math.round((lowH === 360 ? 400_000 : 150_000) * codecMult) },
+  ]
+  const upload = layers.reduce((sum, l) => sum + l.bitrate, 0) + (s.audio ? 128_000 : 0)
+  return { w, h, fps, maxBitrate, layers, upload }
 }
 
 const layerLabel = (l) => `${Math.round(l.h)}p${l.fps}`
@@ -137,23 +143,101 @@ function normalizeServer(raw) {
   return s
 }
 
-async function requestToken(room) {
+/** Chama o Worker do grupo. Lança Error com a mensagem para mostrar ao usuário. */
+async function api(path, { method = 'GET', body } = {}) {
   let res
   try {
-    res = await fetch(`${settings.server}/api/token`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ room, name: settings.name, accessKey: settings.accessKey }),
+    res = await fetch(`${settings.server}${path}`, {
+      method,
+      headers: { 'X-Spectra-Key': settings.accessKey, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
     })
   } catch {
     throw new Error('Não consegui falar com o servidor. Confira o endereço e a sua internet.')
   }
-  const body = await res.json().catch(() => ({}))
+  const data = await res.json().catch(() => ({}))
   if (!res.ok) {
     if (res.status === 429) throw new Error('Muitas tentativas. Espere um minuto e tente de novo.')
-    throw new Error(body.error || `O servidor respondeu com erro ${res.status}.`)
+    throw new Error(data.error || data.errorDescription || `O servidor respondeu com erro ${res.status}.`)
   }
-  return body // { token, url, identity, room }
+  return data
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare Realtime SFU (via proxy do Worker)
+
+async function sfu(method, path, body) {
+  const data = await api(`/api/sfu/${path}`, { method, body })
+  if (data.errorCode) throw new Error(`SFU: ${data.errorDescription || data.errorCode}`)
+  const bad = data.tracks?.find((t) => t.errorCode)
+  if (bad) throw new Error(`SFU: ${bad.errorDescription || bad.errorCode}`)
+  return data
+}
+
+function waitConnected(pc, timeoutMs = 15000) {
+  if (pc.connectionState === 'connected') return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => done(new Error('Tempo esgotado ao conectar com o servidor de mídia.')), timeoutMs)
+    function check() {
+      if (pc.connectionState === 'connected') done()
+      else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') done(new Error('A conexão de mídia falhou.'))
+    }
+    function done(err) {
+      clearTimeout(timer)
+      pc.removeEventListener('connectionstatechange', check)
+      err ? reject(err) : resolve()
+    }
+    pc.addEventListener('connectionstatechange', check)
+  })
+}
+
+/** Cria uma sessão no SFU, ligada a um RTCPeerConnection novo e já conectado. */
+async function newSfuSession() {
+  const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle' })
+  try {
+    pc.createDataChannel('server-events') // garante uma oferta inicial válida
+    await pc.setLocalDescription(await pc.createOffer())
+    const res = await sfu('POST', 'sessions/new', { sessionDescription: pc.localDescription })
+    await pc.setRemoteDescription(res.sessionDescription)
+    await waitConnected(pc)
+    return { pc, sessionId: res.sessionId }
+  } catch (ex) {
+    pc.close()
+    throw ex
+  }
+}
+
+/** Quando o SFU devolve uma oferta (ao puxar faixas), responde e renegocia. */
+async function answerSfuOffer(pc, sessionId, res) {
+  if (!res.requiresImmediateRenegotiation) return
+  await pc.setRemoteDescription(res.sessionDescription)
+  const answer = await pc.createAnswer()
+  await pc.setLocalDescription({ type: 'answer', sdp: opusStereo(answer.sdp) })
+  await sfu('PUT', `sessions/${sessionId}/renegotiate`, { sessionDescription: pc.localDescription })
+}
+
+/** Liga o estéreo e 128 kbps no Opus (o padrão do navegador é mono, pensado para voz). */
+function opusStereo(sdp) {
+  const pt = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i)?.[1]
+  if (!pt) return sdp
+  const extra = 'stereo=1;sprop-stereo=1;maxaveragebitrate=128000'
+  const fmtp = new RegExp(`a=fmtp:${pt} ([^\\r\\n]*)`)
+  if (fmtp.test(sdp)) {
+    return sdp.replace(fmtp, (line, params) => (/stereo=1/.test(params) ? line : `a=fmtp:${pt} ${params};${extra}`))
+  }
+  return sdp.replace(`a=rtpmap:${pt} opus/48000/2`, `a=rtpmap:${pt} opus/48000/2\r\na=fmtp:${pt} ${extra}`)
+}
+
+/** Coloca o codec escolhido em primeiro lugar (os outros ficam como reserva). */
+function preferCodec(transceiver, codec) {
+  const caps = RTCRtpSender.getCapabilities?.('video')?.codecs
+  if (!caps || !transceiver.setCodecPreferences) return true
+  const want = CODEC_MIME[codec]
+  const first = caps.filter((c) => c.mimeType === want)
+  if (!first.length) return false
+  if (codec === 'h264') first.sort((a, b) => Number(/packetization-mode=1/.test(b.sdpFmtpLine)) - Number(/packetization-mode=1/.test(a.sdpFmtpLine)))
+  transceiver.setCodecPreferences([...first, ...caps.filter((c) => c.mimeType !== want)])
+  return true
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +271,7 @@ $('setup-form').addEventListener('submit', async (e) => {
   const prev = settings
   settings = next
   try {
-    await requestToken('PING') // valida servidor + chave de uma vez só
+    await api('/api/check') // valida servidor + chave de uma vez só
     store.set('settings', settings)
     toast('Servidor conectado.', 'ok')
     openHome()
@@ -274,23 +358,38 @@ function isNewer(a, b) {
 // ---------------------------------------------------------------------------
 // Sala
 
-/** @type {import('livekit-client').Room | null} */
-let room = null
+/** WebSocket da sala (presença) */
+let ws = null
+let inRoom = false
 let roomCode = ''
 let leaving = false
-/** identidade de quem estou assistindo (pode ser eu mesmo, como prévia) */
+let reconnectTries = 0
+let reconnectTimer = 0
+let pingTimer = 0
+/** @type {RTCIceServer[]} */
+let iceServers = []
+/** participantes da sala, por id: { id, name, watching, quality, share } */
+let peers = new Map()
+const me = () => identity.id
+/** id de quem estou assistindo (pode ser eu mesmo, como prévia) */
 let watching = null
-/** minha transmissão */
-let myShare = null // { videoPub, audioPub, plan }
+/** minha transmissão: { pc, sessionId, stream, video, audio, videoTx, plan, active } */
+let myShare = null
+/** o que estou recebendo: { pc, sessionId, peerId, share, videoMid, seq } */
+let sub = null
+let subSeq = 0
 let attached = { video: null, audio: null }
 
 async function joinRoom(code) {
-  if (room) return
+  if (inRoom) return
   if (!settings.server || !settings.accessKey || !settings.name) return openSetup(true)
 
+  inRoom = true
   roomCode = code
   leaving = false
   watching = null
+  peers = new Map()
+  reconnectTries = 0
   $('room-code').textContent = code
   setStatus('Conectando…', '')
   meChip($('room-me'))
@@ -300,84 +399,128 @@ async function joinRoom(code) {
   renderStage()
 
   try {
-    const { token, url } = await requestToken(code)
-    room = new Room({
-      adaptiveStream: false, // a qualidade é escolhida pelo espectador
-      dynacast: true, // camadas que ninguém está vendo param de ser codificadas
-      disconnectOnPageLeave: true,
-    })
-    wireRoom(room)
-    await room.connect(url, token, { autoSubscribe: false })
-    room.startAudio().catch(() => {})
+    ;({ iceServers } = await api('/api/ice'))
+    await openSocket()
     rememberRoom(code)
-    setStatus('Conectado', 'ok')
-    pickStream()
-    renderPeople()
+    restartStatsLoop()
   } catch (ex) {
     console.error(ex)
-    const msg = ex instanceof Error && !/^could not|websocket|signal/i.test(ex.message) ? ex.message : 'Não consegui entrar na sala. Confira o servidor.'
-    toast(msg, 'error')
+    toast(ex instanceof Error ? ex.message : 'Não consegui entrar na sala. Confira o servidor.', 'error')
     await cleanupRoom()
     openHome()
   }
 }
 
-function wireRoom(r) {
-  r.on(RoomEvent.ConnectionStateChanged, (state) => {
-    if (state === ConnectionState.Connected) setStatus('Conectado', 'ok')
-    else if (state === ConnectionState.Reconnecting || state === ConnectionState.SignalReconnecting) setStatus('Reconectando…', 'warn')
-  })
-  r.on(RoomEvent.Disconnected, async (reason) => {
-    if (leaving) return
-    const msg =
-      reason === DisconnectReason.DUPLICATE_IDENTITY
-        ? 'Você entrou nesta sala em outra janela.'
-        : reason === DisconnectReason.PARTICIPANT_REMOVED
-          ? 'Você foi removido da sala.'
-          : 'A conexão com a sala caiu.'
-    toast(msg, 'error')
-    await cleanupRoom()
-    openHome()
-  })
+function socketUrl() {
+  const base = settings.server.replace(/^http/i, 'ws')
+  const q = new URLSearchParams({ key: settings.accessKey, name: settings.name, id: me() })
+  return `${base}/api/rooms/${roomCode}/ws?${q}`
+}
 
-  r.on(RoomEvent.ParticipantConnected, renderPeople)
-  r.on(RoomEvent.ParticipantDisconnected, (p) => {
-    if (p.identity === watching) setWatching(null)
-    pickStream()
-    renderPeople()
-  })
-  r.on(RoomEvent.ParticipantAttributesChanged, (_changed, p) => {
-    renderPeople()
-    if (p.identity === watching) renderStage()
-  })
+/** Abre o WebSocket da sala. Resolve quando o servidor manda a lista inicial. */
+function openSocket() {
+  return new Promise((resolve, reject) => {
+    const sock = new WebSocket(socketUrl())
+    ws = sock
+    let welcomed = false
 
-  r.on(RoomEvent.TrackPublished, (pub, p) => {
-    if (p.identity === watching) pub.setSubscribed(true)
-    if (pub.source === Track.Source.ScreenShare) {
-      pickStream()
-      toast(`${p.name || p.identity} começou a transmitir.`)
+    sock.onmessage = (e) => {
+      let msg
+      try {
+        msg = JSON.parse(e.data)
+      } catch {
+        return
+      }
+      if (msg.t === 'welcome') {
+        welcomed = true
+        reconnectTries = 0
+        setStatus('Conectado', 'ok')
+        onPeers(msg.peers)
+        sendMyState()
+        resolve()
+      } else if (msg.t === 'peers') {
+        onPeers(msg.peers)
+      }
     }
-    renderPeople()
-  })
-  r.on(RoomEvent.TrackUnpublished, (pub, p) => {
-    if (pub.source === Track.Source.ScreenShare && p.identity === watching) {
-      setWatching(null)
-      pickStream()
+    sock.onclose = (e) => {
+      clearInterval(pingTimer)
+      if (ws !== sock) return
+      ws = null
+      if (!welcomed) return reject(new Error('Não consegui entrar na sala. Confira o servidor e a chave de acesso.'))
+      if (leaving) return
+      if (e.code === 4000) {
+        toast('Você entrou nesta sala em outra janela.', 'error')
+        cleanupRoom().then(openHome)
+        return
+      }
+      scheduleReconnect()
     }
-    renderPeople()
+    clearInterval(pingTimer)
+    pingTimer = setInterval(() => sock.readyState === WebSocket.OPEN && sock.send('ping'), 25000)
   })
-  r.on(RoomEvent.TrackSubscribed, (track, pub, p) => {
-    if (p.identity !== watching) return
-    attachTrack(track)
-    if (track.kind === Track.Kind.Video) applyViewerQuality()
+}
+
+function scheduleReconnect() {
+  if (reconnectTries >= 6) {
+    toast('A conexão com a sala caiu.', 'error')
+    cleanupRoom().then(openHome)
+    return
+  }
+  setStatus('Reconectando…', 'warn')
+  const delay = Math.min(1000 * 2 ** reconnectTries, 15000)
+  reconnectTries++
+  clearTimeout(reconnectTimer)
+  reconnectTimer = setTimeout(() => {
+    if (leaving || !inRoom) return
+    openSocket().catch(() => !leaving && inRoom && scheduleReconnect())
+  }, delay)
+}
+
+function send(msg) {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'set', ...msg }))
+}
+
+/** Manda ao servidor tudo o que os outros precisam saber de mim (usado também ao reconectar). */
+function sendMyState() {
+  send({
+    watching: watching && watching !== me() ? watching : '',
+    quality: viewer.quality,
+    share: myShare ? shareInfo(myShare) : null,
   })
-  r.on(RoomEvent.TrackUnsubscribed, (track) => detachTrack(track))
-  r.on(RoomEvent.TrackSubscriptionFailed, (_sid, p) => {
-    toast(`Não consegui receber a transmissão de ${p.name || p.identity}.`, 'error')
-  })
-  r.on(RoomEvent.LocalTrackUnpublished, (pub) => {
-    if (pub.source === Track.Source.ScreenShare && myShare) stopShare()
-  })
+}
+
+function shareInfo(s) {
+  return {
+    sessionId: s.sessionId,
+    video: 'screen',
+    audio: s.audio ? 'audio' : null,
+    codec: share.codec,
+    layers: s.plan.layers.map((l) => ({ rid: l.rid, h: Math.round(l.h), fps: l.fps })),
+  }
+}
+
+/** Nova lista de participantes vinda do servidor. */
+function onPeers(list) {
+  const prev = peers
+  peers = new Map((Array.isArray(list) ? list : []).map((p) => [p.id, p]))
+
+  for (const p of peers.values()) {
+    if (p.id !== me() && p.share && !prev.get(p.id)?.share) toast(`${p.name} começou a transmitir.`)
+  }
+
+  // quem eu assisto parou, saiu ou recomeçou a transmissão
+  if (watching && watching !== me()) {
+    const p = peers.get(watching)
+    if (!p?.share) {
+      setWatching(null, false)
+    } else if (sub && sub.share.sessionId !== p.share.sessionId) {
+      setWatching(p.id)
+    }
+  }
+  pickStream()
+  updateDynacast()
+  renderPeople()
+  renderStage()
 }
 
 function setStatus(text, kind) {
@@ -388,13 +531,22 @@ function setStatus(text, kind) {
 
 async function cleanupRoom() {
   leaving = true
+  inRoom = false
+  clearTimeout(reconnectTimer)
+  clearInterval(pingTimer)
   stopStatsLoop()
+  closeSub()
   detachAll()
   if (myShare) await stopShare(true)
-  const r = room
-  room = null
+  const sock = ws
+  ws = null
+  try {
+    sock?.close(1000, 'saiu')
+  } catch {
+    /* já fechado */
+  }
+  peers = new Map()
   watching = null
-  if (r) await r.disconnect().catch(() => {})
   closeDrawer()
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
 }
@@ -421,44 +573,42 @@ $('room-copy').addEventListener('click', async () => {
 // ---- participantes ---------------------------------------------------------
 
 function participants() {
-  if (!room) return []
-  const remotes = [...room.remoteParticipants.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''))
-  return [room.localParticipant, ...remotes]
+  const mine = peers.get(me()) ?? { id: me(), name: settings.name, watching: '', share: null }
+  const others = [...peers.values()].filter((p) => p.id !== me()).sort((a, b) => a.name.localeCompare(b.name))
+  return [{ ...mine, share: myShare ? shareInfo(myShare) : null }, ...others]
 }
-const isSharing = (p) => !!p.getTrackPublication(Track.Source.ScreenShare)
-const nameOf = (p) => p.name || p.identity
-const findParticipant = (identity) =>
-  !room ? null : identity === room.localParticipant.identity ? room.localParticipant : room.remoteParticipants.get(identity)
+const isSharing = (p) => !!p?.share
+const nameOf = (p) => p.name || '?'
+const findPeer = (id) => (id === me() ? participants()[0] : peers.get(id))
+const viewersOf = (id) => [...peers.values()].filter((o) => o.id !== id && o.watching === id)
 
 function renderPeople() {
   const list = participants()
   $('people-count').textContent = String(list.length || 1)
   const ul = $('people')
-  if (!room) {
+  if (!inRoom) {
     ul.replaceChildren()
     return
   }
-  const me = room.localParticipant.identity
   ul.replaceChildren(
     ...list.map((p) => {
       const sharing = isSharing(p)
-      const isMe = p.identity === me
-      const viewers = list.filter((o) => o.identity !== p.identity && o.attributes['spectra.watching'] === p.identity).length
-      const target = p.attributes['spectra.watching']
-      const targetP = target ? findParticipant(target) : null
+      const isMe = p.id === me()
+      const viewers = viewersOf(p.id).length
+      const targetP = p.watching ? findPeer(p.watching) : null
       const sub = sharing
         ? viewers ? `${viewers} assistindo` : 'transmitindo'
-        : targetP && targetP.identity !== p.identity
+        : targetP && targetP.id !== p.id
           ? `assistindo ${nameOf(targetP)}`
           : 'na sala'
       return h(
         'li',
         {
-          class: `person${sharing ? ' can-watch' : ''}${p.identity === watching ? ' is-watched' : ''}`,
+          class: `person${sharing ? ' can-watch' : ''}${p.id === watching ? ' is-watched' : ''}`,
           title: sharing ? (isMe ? 'Ver a prévia da sua transmissão' : `Assistir ${nameOf(p)}`) : null,
-          onclick: sharing ? () => setWatching(p.identity) : null,
+          onclick: sharing ? () => setWatching(p.id) : null,
         },
-        avatar(nameOf(p), p.identity),
+        avatar(nameOf(p), p.id),
         h('span', { class: 'person-text' }, h('b', {}, nameOf(p), isMe ? ' (você)' : ''), h('em', {}, sub)),
         sharing ? h('span', { class: 'live-tag' }, 'AO VIVO') : '',
       )
@@ -470,88 +620,132 @@ function renderPeople() {
 
 /** Se não estou assistindo ninguém, escolhe a primeira transmissão disponível. */
 function pickStream() {
-  if (!room) return
-  const current = watching ? findParticipant(watching) : null
-  const remote = [...room.remoteParticipants.values()].find(isSharing)
-  if (current && isSharing(current) && (current !== room.localParticipant || !remote)) return
-  setWatching(remote ? remote.identity : myShare ? room.localParticipant.identity : null)
+  if (!inRoom) return
+  const current = watching ? findPeer(watching) : null
+  const remote = participants().slice(1).find(isSharing)
+  if (current && isSharing(current) && (current.id !== me() || !remote)) return
+  const next = remote ? remote.id : myShare ? me() : null
+  if (next !== watching) setWatching(next)
 }
 
-function setWatching(identity) {
-  if (!room) return
-  const prev = watching ? findParticipant(watching) : null
-  if (prev && prev !== room.localParticipant) {
-    for (const pub of prev.trackPublications.values()) pub.setSubscribed(false)
-  }
+function setWatching(id, render = true) {
+  if (!inRoom) return
+  closeSub()
   detachAll()
-  watching = identity
-  const p = identity ? findParticipant(identity) : null
+  watching = id
+  const p = id ? findPeer(id) : null
 
-  if (p === room.localParticipant) {
-    const track = myShare?.videoPub?.track
-    if (track) attachTrack(track)
-  } else if (p) {
-    for (const pub of p.trackPublications.values()) {
-      if (pub.source === Track.Source.ScreenShare || pub.source === Track.Source.ScreenShareAudio) {
-        pub.setSubscribed(true)
-        if (pub.track) attachTrack(pub.track)
-      }
-    }
-    applyViewerQuality()
+  if (id === me()) {
+    if (myShare) attachTrack(myShare.video, true)
+  } else if (p?.share) {
+    subscribe(p).catch((ex) => {
+      console.error(ex)
+      if (watching === p.id) toast(`Não consegui receber a transmissão de ${nameOf(p)}.`, 'error')
+    })
   }
 
-  const watchingOther = identity && identity !== room.localParticipant.identity ? identity : ''
-  room.localParticipant.setAttributes({ 'spectra.watching': watchingOther }).catch(() => {})
-  renderStage()
-  renderPeople()
-  restartStatsLoop()
+  send({ watching: id && id !== me() ? id : '' })
+  if (render) {
+    renderStage()
+    renderPeople()
+  }
 }
 
-function attachTrack(track) {
-  if (track.kind === Track.Kind.Video) {
-    track.attach($('stage-video'))
+/** Puxa do SFU o vídeo e o áudio de quem transmite. */
+async function subscribe(p) {
+  const seq = ++subSeq
+  const share = p.share
+  const { pc, sessionId } = await newSfuSession()
+  const stale = () => seq !== subSeq || watching !== p.id
+  if (stale()) return pc.close()
+  sub = { pc, sessionId, peerId: p.id, share, videoMid: null, seq }
+
+  pc.ontrack = (e) => {
+    if (sub?.pc === pc) attachTrack(e.track)
+  }
+  pc.addEventListener('connectionstatechange', () => {
+    if (sub?.pc !== pc || pc.connectionState !== 'failed') return
+    toast('A conexão com a transmissão caiu. Tentando de novo…', 'error')
+    const target = watching
+    setTimeout(() => target && watching === target && setWatching(target), 1500)
+  })
+
+  const tracks = [
+    {
+      location: 'remote',
+      sessionId: share.sessionId,
+      trackName: share.video,
+      simulcast: { preferredRid: QUALITY_RID[viewer.quality], priorityOrdering: 'asciibetical', ridNotAvailable: 'asciibetical' },
+    },
+  ]
+  if (share.audio) tracks.push({ location: 'remote', sessionId: share.sessionId, trackName: share.audio })
+
+  const res = await sfu('POST', `sessions/${sessionId}/tracks/new`, { tracks })
+  if (stale()) return pc.close()
+  sub.videoMid = res.tracks?.find((t) => t.trackName === share.video)?.mid ?? null
+  await answerSfuOffer(pc, sessionId, res)
+}
+
+function closeSub() {
+  subSeq++
+  if (!sub) return
+  sub.pc.close()
+  sub = null
+}
+
+/** Muda a camada (Máxima/Média/Baixa) que o SFU me manda. */
+async function applyViewerQuality() {
+  if (!sub?.videoMid) return
+  const s = sub
+  try {
+    const res = await sfu('PUT', `sessions/${s.sessionId}/tracks/update`, {
+      tracks: [
+        {
+          location: 'remote',
+          sessionId: s.share.sessionId,
+          trackName: s.share.video,
+          mid: s.videoMid,
+          simulcast: { preferredRid: QUALITY_RID[viewer.quality], priorityOrdering: 'asciibetical', ridNotAvailable: 'asciibetical' },
+        },
+      ],
+    })
+    if (sub === s) await answerSfuOffer(s.pc, s.sessionId, res)
+  } catch (ex) {
+    console.error(ex)
+    if (sub === s) setWatching(s.peerId) // assina de novo já com a qualidade nova
+  }
+}
+
+function attachTrack(track, preview = false) {
+  if (track.kind === 'video') {
+    $('stage-video').srcObject = new MediaStream([track])
     attached.video = track
     $('stage').classList.add('has-video')
     renderStage()
-  } else {
-    track.attach($('stage-audio'))
+  } else if (!preview) {
+    $('stage-audio').srcObject = new MediaStream([track])
+    $('stage-audio').volume = viewer.volume
+    $('stage-audio').play().catch(() => {})
     attached.audio = track
-    track.setVolume?.(viewer.volume)
-  }
-}
-function detachTrack(track) {
-  if (attached.video === track) {
-    track.detach($('stage-video'))
-    attached.video = null
-    $('stage').classList.remove('has-video')
-    renderStage()
-  }
-  if (attached.audio === track) {
-    track.detach($('stage-audio'))
-    attached.audio = null
   }
 }
 function detachAll() {
-  if (attached.video) detachTrack(attached.video)
-  if (attached.audio) detachTrack(attached.audio)
+  attached = { video: null, audio: null }
   $('stage-video').srcObject = null
+  $('stage-audio').srcObject = null
+  $('stage').classList.remove('has-video')
 }
 
 // ---- palco ---------------------------------------------------------------------
 
 function watchedLayers() {
-  const p = watching ? findParticipant(watching) : null
-  try {
-    const layers = JSON.parse(p?.attributes['spectra.layers'] || '[]')
-    return Array.isArray(layers) && layers.length ? layers : null
-  } catch {
-    return null
-  }
+  const layers = (watching ? findPeer(watching) : null)?.share?.layers
+  return Array.isArray(layers) && layers.length ? layers : null
 }
 
 function renderStage() {
-  const p = watching ? findParticipant(watching) : null
-  const isMe = room && p === room.localParticipant
+  const p = watching ? findPeer(watching) : null
+  const isMe = p?.id === me()
   const live = !!p
   $('stage-top').hidden = !live
   $('stage-controls').hidden = !live
@@ -584,24 +778,17 @@ function renderStage() {
   select.value = viewer.quality
 }
 
-function applyViewerQuality() {
-  const p = watching ? findParticipant(watching) : null
-  if (!p || !room || p === room.localParticipant) return
-  const pub = p.getTrackPublication(Track.Source.ScreenShare)
-  const q = { high: VideoQuality.HIGH, medium: VideoQuality.MEDIUM, low: VideoQuality.LOW }[viewer.quality]
-  pub?.setVideoQuality?.(q)
-}
-
 $('ctl-quality').addEventListener('change', (e) => {
   viewer = { ...viewer, quality: e.target.value }
   store.set('viewer', viewer)
+  send({ quality: viewer.quality })
   applyViewerQuality()
 })
 
 $('ctl-volume').value = String(viewer.volume)
 $('ctl-volume').addEventListener('input', (e) => {
   viewer = { ...viewer, volume: Number(e.target.value) }
-  attached.audio?.setVolume?.(viewer.volume)
+  $('stage-audio').volume = viewer.volume
   store.set('viewer', viewer)
 })
 
@@ -627,58 +814,73 @@ $('stage').addEventListener('mouseleave', () => $('stage').classList.remove('idl
 
 let statsTimer = 0
 let lastRecv = null
+let lastSent = null
 
 function stopStatsLoop() {
   clearInterval(statsTimer)
   statsTimer = 0
   lastRecv = null
+  lastSent = null
 }
 function restartStatsLoop() {
   stopStatsLoop()
-  if (!room) return
+  if (!inRoom) return
   statsTimer = setInterval(updateStats, 1000)
 }
 
 async function updateStats() {
+  const now = performance.now()
+
   // o que estou recebendo
-  const v = attached.video
-  if (v && v !== myShare?.videoPub?.track && v.getReceiverStats) {
-    const s = await v.getReceiverStats().catch(() => null)
-    if (s) {
-      const now = performance.now()
-      const fps = lastRecv ? ((s.framesDecoded - lastRecv.frames) * 1000) / (now - lastRecv.t) : 0
-      lastRecv = { frames: s.framesDecoded, t: now }
-      const res = s.frameWidth ? `${s.frameWidth}×${s.frameHeight}` : '—'
-      $('stage-stats').textContent = `${res} · ${Math.round(fps)} fps · ${mbps(v.currentBitrate || 0)}`
+  if (sub && watching !== me()) {
+    const stats = await sub.pc.getStats().catch(() => null)
+    let video = null
+    let bytes = 0
+    stats?.forEach((r) => {
+      if (r.type !== 'inbound-rtp') return
+      bytes += r.bytesReceived || 0
+      if (r.kind === 'video') video = r
+    })
+    if (video) {
+      const rate = lastRecv ? ((bytes - lastRecv.bytes) * 8000) / (now - lastRecv.t) : 0
+      lastRecv = { bytes, t: now }
+      const res = video.frameWidth ? `${video.frameWidth}×${video.frameHeight}` : '—'
+      $('stage-stats').textContent = `${res} · ${Math.round(video.framesPerSecond || 0)} fps · ${mbps(Math.max(0, rate))}`
     }
-  } else if (myShare && v) {
+  } else if (myShare && watching === me()) {
     $('stage-stats').textContent = 'Prévia local'
   }
 
   // o que estou enviando
-  if (myShare?.videoPub?.track) {
-    const t = myShare.videoPub.track
-    const layers = await t.getSenderStats().catch(() => [])
-    const top = layers.reduce((a, b) => ((b.frameWidth || 0) > (a?.frameWidth || 0) ? b : a), null)
-    const viewers = participants().filter((p) => p.attributes['spectra.watching'] === room?.localParticipant.identity).length
-    const sent = (t.currentBitrate || 0) + (myShare.audioPub?.track?.currentBitrate || 0)
+  if (myShare) {
+    const stats = await myShare.pc.getStats().catch(() => null)
+    let top = null
+    let bytes = 0
+    stats?.forEach((r) => {
+      if (r.type !== 'outbound-rtp') return
+      bytes += r.bytesSent || 0
+      if (r.kind === 'video' && (r.frameWidth || 0) >= (top?.frameWidth || 0)) top = r
+    })
+    const sent = lastSent ? ((bytes - lastSent.bytes) * 8000) / (now - lastSent.t) : 0
+    lastSent = { bytes, t: now }
+    const viewers = viewersOf(me()).length
     const parts = [
       top?.frameWidth ? `${top.frameWidth}×${top.frameHeight}` : null,
       top?.framesPerSecond ? `${Math.round(top.framesPerSecond)} fps` : null,
-      `${mbps(sent)} enviados`,
+      `${mbps(Math.max(0, sent))} enviados`,
       `${viewers} assistindo`,
     ].filter(Boolean)
-    const sub = $('dock-sub')
+    const subEl = $('dock-sub')
     const reason = top?.qualityLimitationReason
     if (reason === 'cpu') {
-      sub.textContent = `${parts.join(' · ')} — limitado pelo processador: tente 30 fps ou H.264`
-      sub.className = 'hint warn'
+      subEl.textContent = `${parts.join(' · ')} — limitado pelo processador: tente 30 fps ou H.264`
+      subEl.className = 'hint warn'
     } else if (reason === 'bandwidth') {
-      sub.textContent = `${parts.join(' · ')} — limitado pela sua internet: reduza a qualidade`
-      sub.className = 'hint warn'
+      subEl.textContent = `${parts.join(' · ')} — limitado pela sua internet: reduza a qualidade`
+      subEl.className = 'hint warn'
     } else {
-      sub.textContent = parts.join(' · ')
-      sub.className = 'hint'
+      subEl.textContent = parts.join(' · ')
+      subEl.className = 'hint'
     }
   }
 }
@@ -743,7 +945,7 @@ document.addEventListener('keydown', (e) => {
 $('share-btn').addEventListener('click', () => (myShare ? stopShare() : startShare()))
 
 async function startShare() {
-  if (!room || myShare) return
+  if (!inRoom || myShare) return
   const plan = sharePlan(share)
   const btn = $('share-btn')
   btn.disabled = true
@@ -775,57 +977,99 @@ async function startShare() {
   const [audio] = stream.getAudioTracks()
   video.contentHint = share.content === 'detail' ? 'detail' : 'motion'
 
+  let pc = null
   try {
-    const lp = room.localParticipant
-    const lowToHigh = plan.layers.slice(1).reverse()
-    const videoPub = await lp.publishTrack(video, {
-      source: Track.Source.ScreenShare,
-      name: 'screen',
-      videoCodec: share.codec,
-      simulcast: !plan.svc,
-      scalabilityMode: plan.svc ? 'L3T3_KEY' : undefined,
-      backupCodec: plan.svc ? { codec: 'vp8' } : false,
-      screenShareEncoding: { maxBitrate: plan.maxBitrate, maxFramerate: plan.fps, priority: 'high' },
-      screenShareSimulcastLayers: plan.svc
-        ? undefined
-        : lowToHigh.map((l) => new VideoPreset(Math.round((l.h * 16) / 9), l.h, l.bitrate, l.fps, 'medium')),
-      degradationPreference: share.content === 'detail' ? 'maintain-resolution' : 'maintain-framerate',
-    })
+    const session = await newSfuSession()
+    pc = session.pc
 
-    let audioPub = null
-    if (audio) {
-      audioPub = await lp.publishTrack(audio, {
-        source: Track.Source.ScreenShareAudio,
-        name: 'screen-audio',
-        audioPreset: AudioPresets.musicHighQualityStereo,
-        forceStereo: true,
-        dtx: false,
-        red: false,
-      })
-    } else if (share.audio) {
-      toast('Transmitindo sem áudio: marque “Compartilhar áudio do sistema” no seletor.', '')
+    // Simulcast: 3 versões da mesma imagem; o SFU manda a cada um a que ele escolheu.
+    const srcH = video.getSettings().height || plan.h
+    const efficient = share.codec === 'vp9' || share.codec === 'av1'
+    const videoTx = pc.addTransceiver(video, {
+      direction: 'sendonly',
+      streams: [stream],
+      sendEncodings: plan.layers.map((l) => ({
+        rid: l.rid,
+        active: true,
+        maxBitrate: l.bitrate,
+        maxFramerate: l.fps,
+        scaleResolutionDownBy: Math.max(1, srcH / l.h),
+        ...(efficient ? { scalabilityMode: 'L1T3' } : {}),
+        priority: 'high',
+        networkPriority: 'high',
+      })),
+    })
+    if (!preferCodec(videoTx, share.codec)) toast(`${CODEC_NAME[share.codec]} não está disponível aqui; usando outro codec.`)
+
+    const audioTx = audio
+      ? pc.addTransceiver(audio, { direction: 'sendonly', streams: [stream], sendEncodings: [{ maxBitrate: 128_000 }] })
+      : null
+
+    const offer = await pc.createOffer()
+    await pc.setLocalDescription({ type: 'offer', sdp: opusStereo(offer.sdp) })
+    const tracks = [{ location: 'local', mid: videoTx.mid, trackName: 'screen' }]
+    if (audioTx) tracks.push({ location: 'local', mid: audioTx.mid, trackName: 'audio' })
+    const res = await sfu('POST', `sessions/${session.sessionId}/tracks/new`, {
+      sessionDescription: pc.localDescription,
+      tracks,
+    })
+    await pc.setRemoteDescription({ type: 'answer', sdp: opusStereo(res.sessionDescription.sdp) })
+
+    try {
+      const params = videoTx.sender.getParameters()
+      params.degradationPreference = share.content === 'detail' ? 'maintain-resolution' : 'maintain-framerate'
+      await videoTx.sender.setParameters(params)
+    } catch {
+      /* navegador sem suporte: segue com o padrão */
     }
 
-    myShare = { videoPub, audioPub, plan, stream }
-    video.addEventListener('ended', () => stopShare()) // "Parar de compartilhar" do Windows/Chromium
+    if (!audio && share.audio) toast('Transmitindo sem áudio: marque “Compartilhar áudio do sistema” no seletor.', '')
 
-    await lp.setAttributes({
-      'spectra.layers': JSON.stringify(plan.layers.map((l) => ({ h: Math.round(l.h), fps: l.fps }))),
+    myShare = { pc, sessionId: session.sessionId, stream, video, audio, videoTx, plan, active: true }
+    video.addEventListener('ended', () => stopShare()) // "Parar de compartilhar" do Windows/Chromium
+    pc.addEventListener('connectionstatechange', () => {
+      if (myShare?.pc === pc && pc.connectionState === 'failed') {
+        toast('A transmissão caiu.', 'error')
+        stopShare(true)
+      }
     })
+
+    send({ share: shareInfo(myShare) })
+    updateDynacast()
 
     btn.classList.replace('btn-primary', 'btn-danger')
     $('share-btn-label').textContent = 'Parar transmissão'
     $('dock-title').replaceChildren(h('span', { class: 'live-tag' }, 'AO VIVO'), 'Você está transmitindo')
     $('dock-sub').textContent = 'Iniciando…'
-    if (!watching) setWatching(lp.identity)
+    if (!watching) setWatching(me())
     restartStatsLoop()
     renderPeople()
   } catch (ex) {
     console.error(ex)
+    pc?.close()
     stream.getTracks().forEach((t) => t.stop())
-    toast('Não consegui iniciar a transmissão.', 'error')
+    toast(ex instanceof Error && ex.message.startsWith('SFU') ? `Não consegui iniciar a transmissão (${ex.message}).` : 'Não consegui iniciar a transmissão.', 'error')
   } finally {
     btn.disabled = false
+  }
+}
+
+/**
+ * Sem ninguém assistindo, só a camada mais baixa continua (o SFU descarta faixas
+ * paradas por mais de 30 s). Com espectadores, todas as camadas voltam.
+ */
+async function updateDynacast() {
+  const s = myShare
+  if (!s) return
+  const want = viewersOf(me()).length > 0
+  if (want === s.active) return
+  s.active = want
+  try {
+    const params = s.videoTx.sender.getParameters()
+    for (const enc of params.encodings ?? []) enc.active = want || enc.rid === RIDS.at(-1)
+    await s.videoTx.sender.setParameters(params)
+  } catch (ex) {
+    console.warn('dynacast', ex)
   }
 }
 
@@ -833,17 +1077,9 @@ async function stopShare(silent = false) {
   const s = myShare
   if (!s) return
   myShare = null
-  const lp = room?.localParticipant
-  if (watching && lp && watching === lp.identity) setWatching(null)
-  try {
-    if (lp) {
-      if (s.videoPub?.track) await lp.unpublishTrack(s.videoPub.track, true)
-      if (s.audioPub?.track) await lp.unpublishTrack(s.audioPub.track, true)
-      await lp.setAttributes({ 'spectra.layers': '' })
-    }
-  } catch {
-    /* sala já desconectada */
-  }
+  if (watching === me()) setWatching(null)
+  send({ share: null })
+  s.pc.close()
   s.stream.getTracks().forEach((t) => t.stop())
 
   const btn = $('share-btn')
@@ -851,7 +1087,7 @@ async function stopShare(silent = false) {
   $('share-btn-label').textContent = 'Transmitir tela'
   renderShareSummary()
   closeDrawer()
-  if (room) {
+  if (inRoom) {
     pickStream()
     renderPeople()
   }
@@ -862,7 +1098,11 @@ async function stopShare(silent = false) {
 // Início do app
 
 window.addEventListener('beforeunload', () => {
-  room?.disconnect()
+  try {
+    ws?.close(1000, 'saiu')
+  } catch {
+    /* nada a fazer */
+  }
 })
 
 if (!settings.server || !settings.accessKey || !settings.name) openSetup(true)
@@ -870,4 +1110,16 @@ else openHome()
 checkForUpdate()
 
 // para depuração no console (F12)
-window.spectra = { get room() { return room }, sharePlan, version: APP_VERSION }
+window.spectra = {
+  get peers() {
+    return peers
+  },
+  get share() {
+    return myShare
+  },
+  get sub() {
+    return sub
+  },
+  sharePlan,
+  version: APP_VERSION,
+}
