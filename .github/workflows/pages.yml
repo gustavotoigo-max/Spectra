@@ -26,6 +26,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # Endereço do servidor para o aviso de limite de tráfego (variável do repositório, opcional).
+      - name: Configurar servidor
+        env:
+          SPECTRA_SERVER: ${{ vars.SPECTRA_SERVER }}
+        run: sed -i "s#__SPECTRA_SERVER__#${SPECTRA_SERVER}#" site/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

@@ -22,6 +22,10 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       SPECTRA_ACCESS_KEY: ${SPECTRA_ACCESS_KEY}
       LIVEKIT_PUBLIC_URL: wss://${SPECTRA_DOMAIN}
+      # Limite de tráfego de saída por mês. Ao atingir, o Spectra é bloqueado até o dia 1º.
+      SPECTRA_MONTHLY_LIMIT_GB: ${SPECTRA_MONTHLY_LIMIT_GB:-5000}
+    volumes:
+      - spectra_data:/data
 
   caddy:
     image: caddy:2
@@ -35,5 +39,6 @@ services:
       - caddy_config:/config
 
 volumes:
+  spectra_data:
   caddy_data:
   caddy_config:

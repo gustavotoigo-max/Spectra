@@ -47,12 +47,14 @@ fi
 LIVEKIT_API_KEY="${LIVEKIT_API_KEY:-API$(rand 6)}"
 LIVEKIT_API_SECRET="${LIVEKIT_API_SECRET:-$(rand 24)}"
 SPECTRA_ACCESS_KEY="${SPECTRA_ACCESS_KEY:-$(rand 5)}"
+SPECTRA_MONTHLY_LIMIT_GB="${SPECTRA_MONTHLY_LIMIT_GB:-5000}"
 
 cat > .env <<EOF
 SPECTRA_DOMAIN=$DOMAIN
 LIVEKIT_API_KEY=$LIVEKIT_API_KEY
 LIVEKIT_API_SECRET=$LIVEKIT_API_SECRET
 SPECTRA_ACCESS_KEY=$SPECTRA_ACCESS_KEY
+SPECTRA_MONTHLY_LIMIT_GB=$SPECTRA_MONTHLY_LIMIT_GB
 EOF
 chmod 600 .env
 
@@ -127,5 +129,9 @@ cat <<EOF
 
     Servidor:         https://$DOMAIN
     Chave de acesso:  $SPECTRA_ACCESS_KEY
+
+  Limite de tráfego: $SPECTRA_MONTHLY_LIMIT_GB GB por mês (uso em https://$DOMAIN/api/usage).
+  Para o aviso na página de download, crie no GitHub a variável SPECTRA_SERVER
+  (Settings → Secrets and variables → Actions → Variables) com: https://$DOMAIN
 
 EOF
