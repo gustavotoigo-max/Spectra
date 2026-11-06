@@ -1,4 +1,4 @@
-# Cria a VM grátis da Oracle (ARM) sozinho, tentando a cada 5 minutos até ter vaga.
+# Cria a VM grátis da Oracle (ARM) sozinho, tentando sem parar até ter vaga.
 # Quando a VM é criada, o workflow se desliga e mostra o IP no resumo da execução.
 #
 # Precisa destes segredos (Settings → Secrets and variables → Actions → Secrets):
@@ -85,3 +85,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow disable criar-vm-oracle.yml --repo "$GITHUB_REPOSITORY"
+
+      # O agendamento do GitHub é irregular (às vezes passa horas sem rodar), então
+      # cada execução sem vaga já dispara a próxima. O cron fica só de reserva.
+      - name: Agendar a próxima tentativa
+        if: steps.vm.outputs.code == '2'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run criar-vm-oracle.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
