@@ -55,6 +55,28 @@ O nível *Always Free* da Oracle tem VMs ARM com folga de CPU e uma cota de trá
 
 Para atualizar depois: `git pull && sudo ./install.sh` (as chaves são mantidas).
 
+### Criar a VM automaticamente (quando a Oracle diz "Out of capacity")
+
+As VMs ARM grátis vivem sem vaga. O workflow **Criar VM na Oracle** tenta criar a VM a cada 5 minutos pelo GitHub, sem depender do seu PC nem do Cloud Shell aberto. Quando consegue, ele se desliga e mostra o IP no resumo da execução (aba *Actions*).
+
+1. **Rede:** no Cloud Shell da Oracle (ícone `>_` no painel), envie e rode `server/oracle/criar-rede.sh`. Ele cria a rede `spectra` e já libera as portas do Spectra.
+2. **Chave SSH:** no Cloud Shell, rode `ssh-keygen -t rsa -b 4096 -f ~/.ssh/spectra_oci -N ''` (se ainda não tiver) e depois `cat ~/.ssh/spectra_oci.pub`. Copie a linha que aparecer.
+3. **Chave de API da Oracle:** no painel, clique no seu perfil (canto superior direito) → *My profile* → *API keys* → **Add API key** → *Generate API key pair* → **Download private key** → **Add**. A tela seguinte mostra um texto com `user=`, `fingerprint=`, `tenancy=` e `region=`.
+4. **Segredos no GitHub:** em *Settings → Secrets and variables → Actions → New repository secret*, crie:
+
+   | Segredo | Valor |
+   | --- | --- |
+   | `OCI_USER` | o `user=` do passo 3 |
+   | `OCI_FINGERPRINT` | o `fingerprint=` |
+   | `OCI_TENANCY` | o `tenancy=` |
+   | `OCI_REGION` | o `region=` (ex.: `sa-saopaulo-1`) |
+   | `OCI_KEY` | o conteúdo inteiro do arquivo `.pem` baixado no passo 3 |
+   | `SSH_PUBLIC_KEY` | a linha copiada no passo 2 |
+
+5. Em *Actions → Criar VM na Oracle*, clique em **Run workflow** para a primeira tentativa. Depois ele segue sozinho a cada 5 minutos.
+
+Quando a VM sair, entre pelo Cloud Shell com `ssh -i ~/.ssh/spectra_oci ubuntu@IP` e siga o passo 3 da seção acima (`install.sh`). Para tentar de novo no futuro, reative o workflow em *Actions*.
+
 ### Limite de tráfego (5 TB por mês)
 
 A Oracle Always Free inclui 10 TB de tráfego de saída por mês. Para nunca passar disso, o serviço de tokens mede o que sai da VM a cada minuto e, ao chegar em **5 TB** no mês:
