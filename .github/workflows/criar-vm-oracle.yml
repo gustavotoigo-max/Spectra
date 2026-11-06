@@ -1,0 +1,87 @@
+# Cria a VM grátis da Oracle (ARM) sozinho, tentando a cada 5 minutos até ter vaga.
+# Quando a VM é criada, o workflow se desliga e mostra o IP no resumo da execução.
+#
+# Precisa destes segredos (Settings → Secrets and variables → Actions → Secrets):
+#   OCI_USER, OCI_TENANCY, OCI_FINGERPRINT, OCI_REGION, OCI_KEY   (chave de API da Oracle)
+#   SSH_PUBLIC_KEY                                                (conteúdo de ~/.ssh/spectra_oci.pub)
+# Passo a passo no README, seção "Criar a VM automaticamente".
+name: Criar VM na Oracle
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # para se desligar depois de criar a VM
+
+concurrency:
+  group: criar-vm-oracle
+  cancel-in-progress: false
+
+jobs:
+  criar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir segredos
+        id: segredos
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+        run: |
+          if [ -z "$OCI_USER" ] || [ -z "$OCI_KEY" ]; then
+            echo "::warning::Segredos da Oracle ainda não configurados (veja o README). Nada a fazer."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Instalar OCI CLI
+        if: steps.segredos.outputs.ok == 'true'
+        run: pipx install oci-cli
+
+      - name: Configurar OCI CLI
+        if: steps.segredos.outputs.ok == 'true'
+        env:
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          printf '%s\n' "$OCI_KEY" > ~/.oci/key.pem
+          cat > ~/.oci/config <<CFG
+          [DEFAULT]
+          user=$OCI_USER
+          fingerprint=$OCI_FINGERPRINT
+          tenancy=$OCI_TENANCY
+          region=$OCI_REGION
+          key_file=$HOME/.oci/key.pem
+          CFG
+          chmod 600 ~/.oci/key.pem ~/.oci/config
+
+      - name: Tentar criar a VM
+        id: vm
+        if: steps.segredos.outputs.ok == 'true'
+        env:
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          TEMPO_MAXIMO: '240'
+        run: |
+          set +e
+          bash server/oracle/criar-vm.sh
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 2 = ainda sem vaga: não é erro, a próxima execução tenta de novo
+          [ "$code" -eq 0 ] || [ "$code" -eq 2 ]
+
+      - name: Desligar este workflow (VM criada)
+        if: steps.vm.outputs.code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow disable criar-vm-oracle.yml --repo "$GITHUB_REPOSITORY"
