@@ -17,6 +17,13 @@ fi
 
 say() { printf '\n\033[1;35m==> %s\033[0m\n' "$*"; }
 
+# ---- 0. Memória extra (VMs pequenas, como a AMD Micro de 1 GB) ----------------
+if [ "$(awk '/MemTotal/ {print $2}' /proc/meminfo)" -lt 3000000 ] && ! swapon --show | grep -q .; then
+  say "Pouca memória: criando 2 GB de swap"
+  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 # ---- 1. Docker -------------------------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
   say "Instalando o Docker"

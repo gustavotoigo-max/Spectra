@@ -11,13 +11,19 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+    inputs:
+      formato:
+        description: 'arm (VM principal, tenta até ter vaga) ou micro (AMD pequena, uma tentativa só)'
+        type: choice
+        options: [arm, micro]
+        default: arm
 
 permissions:
   contents: read
   actions: write # para se desligar depois de criar a VM
 
 concurrency:
-  group: criar-vm-oracle
+  group: criar-vm-oracle-${{ inputs.formato || 'arm' }}
   cancel-in-progress: false
 
 jobs:
@@ -72,6 +78,8 @@ jobs:
           OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
           SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
           TEMPO_MAXIMO: '240'
+          SHAPE: ${{ inputs.formato == 'micro' && 'VM.Standard.E2.1.Micro' || 'VM.Standard.A1.Flex' }}
+          NOME: ${{ inputs.formato == 'micro' && 'spectra-micro' || 'spectra' }}
         run: |
           set +e
           bash server/oracle/criar-vm.sh
@@ -81,7 +89,7 @@ jobs:
           [ "$code" -eq 0 ] || [ "$code" -eq 2 ]
 
       - name: Desligar este workflow (VM criada)
-        if: steps.vm.outputs.code == '0'
+        if: steps.vm.outputs.code == '0' && inputs.formato != 'micro'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow disable criar-vm-oracle.yml --repo "$GITHUB_REPOSITORY"
@@ -89,7 +97,7 @@ jobs:
       # O agendamento do GitHub é irregular (às vezes passa horas sem rodar), então
       # cada execução sem vaga já dispara a próxima. O cron fica só de reserva.
       - name: Agendar a próxima tentativa
-        if: steps.vm.outputs.code == '2'
+        if: steps.vm.outputs.code == '2' && inputs.formato != 'micro'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run criar-vm-oracle.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
