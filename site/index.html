@@ -104,7 +104,7 @@
 
     <footer class="footer">
       <span class="brand"><img src="favicon.svg" alt="" width="20" height="20" /><span>Spectra</span></span>
-      <span>Código aberto · servidor próprio com LiveKit</span>
+      <span>Código aberto · servidor gratuito</span>
     </footer>
 
     <script>
@@ -123,7 +123,7 @@
       ;(() => {
         const server = document.querySelector('meta[name="spectra-server"]')?.content || ''
         if (!/^https:\/\//.test(server)) return
-        const tb = (b) => `${(b / 1e12).toFixed(2).replace('.', ',')} TB`
+        const tb = (b) => (b >= 1e12 ? `${(b / 1e12).toFixed(2).replace('.', ',')} TB` : `${Math.round(b / 1e9)} GB`)
         const date = (iso) => String(iso).split('-').reverse().join('/')
         fetch(`${server.replace(/\/+$/, '')}/api/usage`, { cache: 'no-store' })
           .then((r) => (r.ok ? r.json() : null))

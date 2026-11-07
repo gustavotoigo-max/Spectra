@@ -3,10 +3,19 @@
 Transmissão de tela para o seu grupo, no estilo do Discord: um app para Windows em C#, um servidor SFU gratuito e uma página de download.
 
 ```
-Transmissor (Spectra.exe) ──1 fluxo, 3 camadas──► Servidor SFU (LiveKit) ──┬──► Espectador 1 (escolheu 1080p60)
-                                                                           ├──► Espectador 2 (escolheu 720p30)
-                                                                           └──► Espectador 3 (escolheu 360p15)
+Transmissor (Spectra.exe) ──1 fluxo, 3 camadas──► Servidor SFU ──┬──► Espectador 1 (escolheu 1080p60)
+                                                                 ├──► Espectador 2 (escolheu 720p30)
+                                                                 └──► Espectador 3 (escolheu 360p15)
 ```
+
+O servidor pode ser de dois tipos, e o app descobre sozinho qual é pelo endereço configurado:
+
+| Servidor | Custo | Limite do mês | Observação |
+| --- | --- | --- | --- |
+| **Cloudflare Realtime** (`server/worker`) | grátis até 1.000 GB/mês | o app bloqueia em 900 GB | sem VM; a Cloudflare pede um cartão ou PayPal cadastrado |
+| **LiveKit numa VM da Oracle** (`server/`) | grátis (Always Free) | o app bloqueia em 5 TB | a VM ARM grátis vive sem vaga em São Paulo |
+
+Para migrar de um para o outro, basta trocar o endereço do servidor nas configurações do app.
 
 - **Quem transmite envia uma vez só.** O servidor replica para cada espectador, sem recodificar nada.
 - **Simulcast:** o transmissor manda 3 versões (por exemplo 1080p60, 720p30 e 360p15) e cada espectador escolhe a que quer receber. Se a internet de alguém piorar, o servidor baixa a qualidade só para essa pessoa.
@@ -17,12 +26,29 @@ Transmissor (Spectra.exe) ──1 fluxo, 3 camadas──► Servidor SFU (LiveKi
 
 | Pasta | O que é |
 | --- | --- |
-| `app/Spectra` | App para Windows: WPF + WebView2 (.NET 8). A interface (HTML/CSS/JS, com o SDK do LiveKit) vai embutida no `.exe`. |
-| `server/` | Servidor: LiveKit (SFU), serviço de tokens em C# e Caddy (HTTPS automático), tudo em Docker. |
+| `app/Spectra` | App para Windows: WPF + WebView2 (.NET 8). A interface (HTML/CSS/JS) vai embutida no `.exe`: `app-cloudflare.js` (WebRTC direto com o SFU da Cloudflare) e `app-livekit.js` (SDK do LiveKit); o `app.js` carrega o certo. |
+| `server/worker` | Servidor na Cloudflare: um Worker (JavaScript, a Cloudflare não roda C#) com as salas (Durable Objects), a chave do grupo, o proxy do SFU e o limite do mês. |
+| `server/` | Servidor na VM: LiveKit (SFU), serviço de tokens em C# e Caddy (HTTPS automático), tudo em Docker. |
 | `site/` | Página de download (GitHub Pages). |
 | `.github/workflows` | Build do `.exe` no Windows, release por tag e publicação da página. |
 
-## 1. Subir o servidor (grátis, na Oracle Cloud)
+## 1a. Subir o servidor na Cloudflare (sem VM)
+
+O GitHub publica o Worker sozinho: você só cria as chaves na Cloudflare e guarda como segredos do repositório.
+
+1. Crie uma conta em [dash.cloudflare.com](https://dash.cloudflare.com) e cadastre uma forma de pagamento (cartão ou PayPal). O Realtime exige, mesmo no plano grátis.
+2. Abra **Workers & Pages** uma vez. Se pedir, escolha um subdomínio `.workers.dev`.
+3. **Realtime → Serverless SFU → Create**: anote o **App ID** e o **App Token**.
+4. Copie o **Account ID** (página inicial da conta, à direita).
+5. **My Profile → API Tokens → Create Token**, com o modelo **Edit Cloudflare Workers**.
+6. No GitHub, em *Settings → Secrets and variables → Actions*, crie os segredos `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `CF_APP_ID`, `CF_APP_TOKEN` e `SPECTRA_ACCESS_KEY` (a senha do grupo, inventada por você).
+7. Rode **Actions → Servidor na Cloudflare → Run workflow**. O resumo da execução mostra o endereço do servidor (algo como `https://spectra.seu-nome.workers.dev`). É ele que vai no app.
+
+Opcional: os segredos `TURN_KEY_ID` e `TURN_KEY_TOKEN` (**Realtime → TURN Server → Create**) ajudam quem está em redes muito restritas.
+
+**Limite do mês:** cada app informa ao Worker quanto recebeu do SFU, e o Worker bloqueia novas conexões ao chegar em 900 GB (a Cloudflare cobra só acima de 1.000 GB). Para mudar, crie a variável `SPECTRA_MONTHLY_LIMIT_GB` (aba *Variables*) e rode o workflow de novo. O consumo aparece em `https://SEU-SERVIDOR/api/usage`.
+
+## 1b. Subir o servidor numa VM (grátis, na Oracle Cloud)
 
 O nível *Always Free* da Oracle tem VMs ARM com folga de CPU e uma cota de tráfego de saída bem alta, o suficiente para transmitir para um grupo de amigos sem custo. Confira os limites atuais na página da Oracle ao criar a conta.
 
