@@ -1,0 +1,113 @@
+# Publica o servidor na Cloudflare (pasta server/worker) a cada push no main que
+# muda o Worker. Também dá para rodar à mão em Actions → Servidor na Cloudflare.
+#
+# Precisa destes segredos (Settings → Secrets and variables → Actions → Secrets):
+#   CLOUDFLARE_API_TOKEN    token com o modelo "Edit Cloudflare Workers"
+#   CLOUDFLARE_ACCOUNT_ID   ID da conta da Cloudflare
+#   CF_APP_ID, CF_APP_TOKEN app do Realtime → Serverless SFU
+#   SPECTRA_ACCESS_KEY      senha do grupo, que os amigos digitam no app
+# Opcionais: TURN_KEY_ID, TURN_KEY_TOKEN (TURN do Realtime, para redes restritas).
+# Variável opcional (aba Variables): SPECTRA_MONTHLY_LIMIT_GB (padrão 900).
+name: Servidor na Cloudflare
+
+on:
+  push:
+    branches: [main]
+    paths: ['server/worker/**', '.github/workflows/worker.yml']
+  pull_request:
+    paths: ['server/worker/**', '.github/workflows/worker.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: server/worker
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/worker/package-lock.json
+      - run: npm ci
+      - name: Conferir o código
+        run: npm run check
+
+      - name: Conferir segredos
+        id: segredos
+        if: github.event_name != 'pull_request'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_APP_ID: ${{ secrets.CF_APP_ID }}
+          CF_APP_TOKEN: ${{ secrets.CF_APP_TOKEN }}
+          SPECTRA_ACCESS_KEY: ${{ secrets.SPECTRA_ACCESS_KEY }}
+        run: |
+          faltam=""
+          for n in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CF_APP_ID CF_APP_TOKEN SPECTRA_ACCESS_KEY; do
+            [ -n "${!n}" ] || faltam="$faltam $n"
+          done
+          if [ -n "$faltam" ]; then
+            echo "::warning::Faltam os segredos:$faltam (veja o README). O Worker não foi publicado."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publicar
+        id: publicar
+        if: steps.segredos.outputs.ok == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npx wrangler deploy 2>&1 | tee deploy.log
+          url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Gravar segredos no Worker
+        if: steps.segredos.outputs.ok == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_APP_ID: ${{ secrets.CF_APP_ID }}
+          CF_APP_TOKEN: ${{ secrets.CF_APP_TOKEN }}
+          SPECTRA_ACCESS_KEY: ${{ secrets.SPECTRA_ACCESS_KEY }}
+          TURN_KEY_ID: ${{ secrets.TURN_KEY_ID }}
+          TURN_KEY_TOKEN: ${{ secrets.TURN_KEY_TOKEN }}
+          SPECTRA_MONTHLY_LIMIT_GB: ${{ vars.SPECTRA_MONTHLY_LIMIT_GB }}
+        run: |
+          umask 077
+          jq -n 'env | {CF_APP_ID, CF_APP_TOKEN, SPECTRA_ACCESS_KEY, TURN_KEY_ID, TURN_KEY_TOKEN, SPECTRA_MONTHLY_LIMIT_GB}
+                 | with_entries(select(.value != null and .value != ""))' > "$RUNNER_TEMP/segredos.json"
+          npx wrangler secret bulk "$RUNNER_TEMP/segredos.json"
+          rm -f "$RUNNER_TEMP/segredos.json"
+
+      - name: Testar
+        if: steps.segredos.outputs.ok == 'true'
+        env:
+          URL: ${{ steps.publicar.outputs.url }}
+        run: |
+          [ -n "$URL" ] || { echo "::error::Não achei o endereço do Worker na saída do deploy."; exit 1; }
+          for i in 1 2 3 4 5 6; do
+            resp=$(curl -fsS "$URL/api/health" || true)
+            echo "$resp" | grep -q '"configured":true' && break
+            sleep 5
+          done
+          echo "$resp"
+          echo "$resp" | grep -q '"configured":true' || { echo "::error::O Worker respondeu, mas sem configuração."; exit 1; }
+          {
+            echo "### ✅ Servidor na Cloudflare publicado"
+            echo ""
+            echo "Endereço do servidor (use no app): \`$URL\`"
+          } >> "$GITHUB_STEP_SUMMARY"

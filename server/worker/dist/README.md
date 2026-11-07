@@ -1,1 +1,0 @@
-This folder contains the built output assets for the worker "spectra" generated at 2026-11-05T21:05:49.183Z.
